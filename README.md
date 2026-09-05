@@ -1,58 +1,34 @@
 # Sure MCP Server
 
-A Model Context Protocol (MCP) server for integrating with the [Sure](https://github.com/we-promise/sure) self-hosted personal finance platform. This server provides access to your financial accounts, transactions, categories, and AI chat through Claude Desktop.
+A Model Context Protocol (MCP) server for integrating with the [Sure](https://github.com/we-promise/sure) self-hosted personal finance platform. It exposes a Streamable HTTP endpoint for remote clients such as Hermes Agent.
 
 ## Quick Start
 
-There are two ways to run the Sure MCP Server: **Docker (recommended)** or **manual installation**.
+There are two ways to run the Sure MCP Server: **Docker (recommended)** or **manual installation**. In both cases the MCP endpoint is `http://localhost:8000/mcp` and the health endpoint is `http://localhost:8000/health`.
 
 ### Option A: Docker Installation (Recommended)
 
-1. **Build the Docker image**:
+1. Copy `.env.example` to `.env` and set at least:
+
+   ```env
+   SURE_API_URL=http://host.docker.internal:3000
+   SURE_API_KEY=your-api-key-here
+   MCP_AUTH_TOKEN=generate-a-long-random-secret
+   ```
+
+2. **Build and start the Docker image**:
+
    ```bash
-   docker compose build
+   docker compose up --build -d
    ```
 
-2. **Configure Claude Desktop** to use Docker:
-
-   **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-   **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-   ```json
-   {
-     "mcpServers": {
-       "Sure": {
-         "command": "docker",
-         "args": [
-           "run",
-           "-i",
-           "--rm",
-           "-e", "SURE_API_URL",
-           "-e", "SURE_API_KEY",
-           "-e", "SURE_VERIFY_SSL",
-           "--add-host=host.docker.internal:host-gateway",
-           "sure-mcp-server"
-         ],
-         "env": {
-           "SURE_API_URL": "http://host.docker.internal:3000",
-           "SURE_API_KEY": "your-api-key-here",
-           "SURE_VERIFY_SSL": "false"
-         }
-       }
-     }
-   }
-   ```
-
-   **Note**: Use `host.docker.internal` to connect to Sure running on your host machine.
-
-3. **Restart Claude Desktop**
+3. Confirm that `curl http://localhost:8000/health` returns `{"status":"ok",...}`.
 
 ### Option B: Manual Installation
 
 1. **Clone this repository**:
    ```bash
-   git clone https://github.com/robcerda/sure-mcp-server.git
+   git clone https://github.com/pro-mirage/sure-mcp-server.git
    cd sure-mcp-server
    ```
 
@@ -62,51 +38,45 @@ There are two ways to run the Sure MCP Server: **Docker (recommended)** or **man
    pip install -e .
    ```
 
-3. **Configure Claude Desktop**:
-   Add this to your Claude Desktop configuration file:
+3. Configure the environment and start the HTTP server:
 
-   **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-   **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-   ```json
-   {
-     "mcpServers": {
-       "Sure": {
-         "command": "uv",
-         "args": [
-           "run",
-           "--with",
-           "mcp[cli]",
-           "--with-editable",
-           "/path/to/your/sure-mcp-server",
-           "mcp",
-           "run",
-           "/path/to/your/sure-mcp-server/src/sure_mcp_server/server.py"
-         ],
-         "env": {
-           "SURE_API_URL": "http://localhost:3000",
-           "SURE_API_KEY": "your-api-key-here"
-         }
-       }
-     }
-   }
+   ```bash
+   export SURE_API_URL=http://localhost:3000
+   export SURE_API_KEY=your-api-key-here
+   export MCP_AUTH_TOKEN=generate-a-long-random-secret
+   sure-mcp-server
    ```
 
-   **Important**: Replace `/path/to/your/sure-mcp-server` with your actual path!
+### Connect Hermes Agent
 
-4. **Restart Claude Desktop**
+Add the deployed endpoint to `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  sure:
+    url: "https://sure-mcp.example.com/mcp"
+    headers:
+      Authorization: "Bearer generate-a-long-random-secret"
+    timeout: 120
+    connect_timeout: 30
+```
+
+Tool names in Hermes are prefixed with the server name, for example `mcp_sure_get_accounts`.
+
+### Deploy on Coolify
+
+Deploy this repository as a single **Application** using the **Dockerfile** build pack. Set the container port to `8000`, health check path to `/health`, and point the public domain at port `8000`. See [COOLIFY.md](COOLIFY.md) for the complete setup.
 
 ### Get Your Sure API Key
 
 1. Start your Sure Docker instance: `docker compose up -d`
 2. Log into Sure at `http://localhost:3000`
 3. Go to **Settings > API Key** and generate a new key
-4. Copy the API key to your Claude Desktop config
+4. Add the API key to the Sure MCP server environment
 
-### Start Using in Claude Desktop
+### Start Using in Hermes
 
-Once configured, use these tools directly in Claude Desktop:
+Once configured, use these tools through Hermes:
 - `get_accounts` - View all accounts
 - `get_transactions` - Recent transactions
 - `get_categories` - Transaction categories
@@ -140,11 +110,18 @@ Once configured, use these tools directly in Claude Desktop:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SURE_API_URL` | Yes | - | Base URL of your Sure instance |
-| `SURE_API_KEY` | Yes | - | API key from Sure settings |
+| `SURE_API_KEY` | One auth method required | - | API key from Sure settings |
+| `SURE_ACCESS_TOKEN` | One auth method required | - | Alternative Sure bearer token |
 | `SURE_TIMEOUT` | No | 30 | Request timeout in seconds |
 | `SURE_VERIFY_SSL` | No | true | Verify SSL certificates |
+| `MCP_HOST` | No | 0.0.0.0 | HTTP bind address |
+| `PORT` | No | 8000 | HTTP listen port |
+| `MCP_PATH` | No | /mcp | Streamable HTTP endpoint path |
+| `MCP_JSON_RESPONSE` | No | true | Return JSON rather than an SSE body for each response |
+| `MCP_STATELESS_HTTP` | No | true | Avoid server-side session affinity |
+| `MCP_AUTH_TOKEN` | Recommended | - | Bearer token required from MCP clients when set |
 
-For local Docker setup, use `SURE_API_URL=http://localhost:3000` and `SURE_VERIFY_SSL=false`.
+For Docker connecting to Sure on the host machine, use `SURE_API_URL=http://host.docker.internal:3000`. Set `SURE_VERIFY_SSL=false` only for a trusted development endpoint with a self-signed certificate.
 
 ## Date Formats
 
@@ -154,9 +131,14 @@ For local Docker setup, use `SURE_API_URL=http://localhost:3000` and `SURE_VERIF
 ## Troubleshooting
 
 ### Connection Issues
-1. Verify Sure is running: `docker compose ps`
-2. Check the API URL is correct
-3. Try `check_connection` tool to diagnose
+1. Verify `/health` responds successfully.
+2. Verify the client URL includes `/mcp`.
+3. Check that the Hermes `Authorization` header matches `MCP_AUTH_TOKEN`.
+4. Check the Sure API URL and use `check_connection` to diagnose upstream access.
+
+### `mcp.server.fastmcp` import error
+
+The application uses the MCP 1.x `FastMCP` API. Both dependency files deliberately constrain the SDK to v1; rebuild the Docker image without cache if an older layer installed MCP 2.x.
 
 ### Authentication Issues
 1. Verify your API key is correct
@@ -172,6 +154,10 @@ sure-mcp-server/
 │   └── server.py         # Main server implementation
 ├── pyproject.toml
 ├── requirements.txt
+├── COOLIFY.md
+├── Dockerfile
+├── docker-compose.yml
+├── tests/
 └── README.md
 ```
 

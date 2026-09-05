@@ -1,13 +1,17 @@
 """Sure MCP Server - Main server implementation."""
 
-import os
-import logging
 import json
-from typing import Any, Dict, List, Optional
+import logging
+import os
+import secrets
+from typing import Any
 
+import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-import httpx
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -16,19 +20,74 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Initialize FastMCP server
-mcp = FastMCP("Sure MCP Server")
+
+def get_bool_env(name: str, default: bool) -> bool:
+    """Read a boolean environment variable."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+PORT = int(os.getenv("PORT", "8000"))
+MCP_PATH = os.getenv("MCP_PATH", "/mcp")
+if not MCP_PATH.startswith("/"):
+    MCP_PATH = f"/{MCP_PATH}"
+
+# Configure FastMCP for a remote, proxy-friendly Streamable HTTP deployment.
+mcp = FastMCP(
+    "Sure MCP Server",
+    host=os.getenv("MCP_HOST", "0.0.0.0"),
+    port=PORT,
+    streamable_http_path=MCP_PATH,
+    json_response=get_bool_env("MCP_JSON_RESPONSE", True),
+    stateless_http=get_bool_env("MCP_STATELESS_HTTP", True),
+)
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(_request: Request) -> JSONResponse:
+    """Return a lightweight liveness response for Coolify."""
+    return JSONResponse({"status": "ok", "service": "sure-mcp-server"})
+
+
+class BearerAuthMiddleware:
+    """Optionally protect the MCP endpoint with a static bearer token."""
+
+    def __init__(self, app: ASGIApp, path: str, token: str | None) -> None:
+        self.app = app
+        self.path = path.rstrip("/") or "/"
+        self.token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        request_path = scope.get("path", "").rstrip("/") or "/"
+        if self.token and scope["type"] == "http" and request_path == self.path:
+            headers = dict(scope.get("headers", []))
+            supplied = headers.get(b"authorization", b"").decode("utf-8")
+            expected = f"Bearer {self.token}"
+            if not secrets.compare_digest(supplied, expected):
+                response = JSONResponse(
+                    {"error": "Unauthorized"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+                await response(scope, receive, send)
+                return
+
+        await self.app(scope, receive, send)
 
 
 def get_api_url() -> str:
     """Get the Sure API base URL."""
     url = os.getenv("SURE_API_URL")
     if not url:
-        raise RuntimeError("❌ SURE_API_URL not configured. Set it in your environment.")
+        raise RuntimeError(
+            "❌ SURE_API_URL not configured. Set it in your environment."
+        )
     return url.rstrip("/")
 
 
-def get_auth_header() -> Dict[str, str]:
+def get_auth_header() -> dict[str, str]:
     """Get authentication header for API requests."""
     api_key = os.getenv("SURE_API_KEY")
     access_token = os.getenv("SURE_ACCESS_TOKEN")
@@ -38,7 +97,9 @@ def get_auth_header() -> Dict[str, str]:
     elif access_token:
         return {"Authorization": f"Bearer {access_token}"}
     else:
-        raise RuntimeError("❌ No authentication configured. Set SURE_API_KEY or SURE_ACCESS_TOKEN.")
+        raise RuntimeError(
+            "❌ No authentication configured. Set SURE_API_KEY or SURE_ACCESS_TOKEN."
+        )
 
 
 def get_client() -> httpx.Client:
@@ -50,7 +111,7 @@ def get_client() -> httpx.Client:
         base_url=get_api_url(),
         timeout=timeout,
         verify=verify_ssl,
-        headers=get_auth_header()
+        headers=get_auth_header(),
     )
 
 
@@ -85,13 +146,19 @@ def setup_authentication() -> str:
 
 3️⃣ Go to Settings > API Key and generate a new key
 
-4️⃣ Add to your Claude Desktop config:
-   "env": {
-     "SURE_API_URL": "http://localhost:3000",
-     "SURE_API_KEY": "your-api-key-here"
-   }
+4️⃣ Configure this server:
+   SURE_API_URL=https://your-sure-instance.example.com
+   SURE_API_KEY=your-api-key-here
+   MCP_AUTH_TOKEN=generate-a-separate-long-random-secret
 
-5️⃣ Restart Claude Desktop
+5️⃣ Add the remote endpoint to ~/.hermes/config.yaml:
+   mcp_servers:
+     sure:
+       url: "https://sure-mcp.example.com/mcp"
+       headers:
+         Authorization: "Bearer <MCP_AUTH_TOKEN>"
+
+6️⃣ Restart Hermes Agent
 
 ✅ Start using Sure tools:
    • get_accounts - View all accounts
@@ -120,7 +187,9 @@ def check_auth_status() -> str:
         elif access_token:
             status += "✅ Access Token configured\n"
         else:
-            status += "❌ No authentication configured (SURE_API_KEY or SURE_ACCESS_TOKEN)\n"
+            status += (
+                "❌ No authentication configured (SURE_API_KEY or SURE_ACCESS_TOKEN)\n"
+            )
 
         status += "\n💡 Try get_accounts to test the connection."
 
@@ -137,7 +206,9 @@ def check_connection() -> str:
             response = client.get("/api/v1/usage")
             data = handle_response(response)
 
-            return f"✅ Connected to Sure API\n{json.dumps(data, indent=2, default=str)}"
+            return (
+                f"✅ Connected to Sure API\n{json.dumps(data, indent=2, default=str)}"
+            )
     except Exception as e:
         logger.error(f"Failed to connect: {e}")
         return f"❌ Connection failed: {str(e)}"
@@ -156,7 +227,8 @@ def get_accounts() -> str:
             if isinstance(accounts, dict):
                 accounts = accounts.get("accounts", [])
 
-            logger.info(f"✅ Retrieved {len(accounts) if isinstance(accounts, list) else 'unknown'} accounts")
+            account_count = len(accounts) if isinstance(accounts, list) else "unknown"
+            logger.info("✅ Retrieved %s accounts", account_count)
             return json.dumps(accounts, indent=2, default=str)
     except Exception as e:
         logger.error(f"Failed to get accounts: {e}")
@@ -166,11 +238,11 @@ def get_accounts() -> str:
 @mcp.tool()
 def get_transactions(
     limit: int = 25,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    account_ids: Optional[str] = None,
-    category_ids: Optional[str] = None,
-    search: Optional[str] = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    account_ids: str | None = None,
+    category_ids: str | None = None,
+    search: str | None = None,
 ) -> str:
     """
     Get transactions from Sure.
@@ -185,7 +257,7 @@ def get_transactions(
     """
     try:
         with get_client() as client:
-            params: Dict[str, Any] = {"per_page": min(limit, 100)}
+            params: dict[str, Any] = {"per_page": min(limit, 100)}
 
             if start_date:
                 params["start_date"] = start_date
@@ -206,7 +278,10 @@ def get_transactions(
             if isinstance(transactions, dict):
                 transactions = transactions.get("transactions", [])
 
-            logger.info(f"✅ Retrieved {len(transactions) if isinstance(transactions, list) else 'unknown'} transactions")
+            transaction_count = (
+                len(transactions) if isinstance(transactions, list) else "unknown"
+            )
+            logger.info("✅ Retrieved %s transactions", transaction_count)
             return json.dumps(transactions, indent=2, default=str)
     except Exception as e:
         logger.error(f"Failed to get transactions: {e}")
@@ -238,9 +313,9 @@ def create_transaction(
     amount: float,
     name: str,
     date: str,
-    category_id: Optional[str] = None,
-    notes: Optional[str] = None,
-    nature: Optional[str] = None,
+    category_id: str | None = None,
+    notes: str | None = None,
+    nature: str | None = None,
 ) -> str:
     """
     Create a new transaction in Sure.
@@ -256,7 +331,7 @@ def create_transaction(
     """
     try:
         with get_client() as client:
-            payload: Dict[str, Any] = {
+            payload: dict[str, Any] = {
                 "account_id": account_id,
                 "amount": amount,
                 "name": name,
@@ -271,12 +346,11 @@ def create_transaction(
                 payload["nature"] = nature
 
             response = client.post(
-                "/api/v1/transactions",
-                json={"transaction": payload}
+                "/api/v1/transactions", json={"transaction": payload}
             )
             data = handle_response(response)
 
-            logger.info(f"✅ Created transaction")
+            logger.info("✅ Created transaction")
             return json.dumps(data, indent=2, default=str)
     except Exception as e:
         logger.error(f"Failed to create transaction: {e}")
@@ -286,11 +360,11 @@ def create_transaction(
 @mcp.tool()
 def update_transaction(
     transaction_id: str,
-    amount: Optional[float] = None,
-    name: Optional[str] = None,
-    date: Optional[str] = None,
-    category_id: Optional[str] = None,
-    notes: Optional[str] = None,
+    amount: float | None = None,
+    name: str | None = None,
+    date: str | None = None,
+    category_id: str | None = None,
+    notes: str | None = None,
 ) -> str:
     """
     Update an existing transaction in Sure.
@@ -305,7 +379,7 @@ def update_transaction(
     """
     try:
         with get_client() as client:
-            payload: Dict[str, Any] = {}
+            payload: dict[str, Any] = {}
 
             if amount is not None:
                 payload["amount"] = amount
@@ -319,8 +393,7 @@ def update_transaction(
                 payload["notes"] = notes
 
             response = client.patch(
-                f"/api/v1/transactions/{transaction_id}",
-                json={"transaction": payload}
+                f"/api/v1/transactions/{transaction_id}", json={"transaction": payload}
             )
             data = handle_response(response)
 
@@ -364,7 +437,10 @@ def get_categories() -> str:
             if isinstance(categories, dict):
                 categories = categories.get("categories", [])
 
-            logger.info(f"✅ Retrieved {len(categories) if isinstance(categories, list) else 'unknown'} categories")
+            category_count = (
+                len(categories) if isinstance(categories, list) else "unknown"
+            )
+            logger.info("✅ Retrieved %s categories", category_count)
             return json.dumps(categories, indent=2, default=str)
     except Exception as e:
         logger.error(f"Failed to get categories: {e}")
@@ -432,7 +508,8 @@ def list_chats() -> str:
             if isinstance(chats, dict):
                 chats = chats.get("chats", [])
 
-            logger.info(f"✅ Retrieved {len(chats) if isinstance(chats, list) else 'unknown'} chats")
+            chat_count = len(chats) if isinstance(chats, list) else "unknown"
+            logger.info("✅ Retrieved %s chats", chat_count)
             return json.dumps(chats, indent=2, default=str)
     except Exception as e:
         logger.error(f"Failed to list chats: {e}")
@@ -440,7 +517,7 @@ def list_chats() -> str:
 
 
 @mcp.tool()
-def create_chat(title: Optional[str] = None) -> str:
+def create_chat(title: str | None = None) -> str:
     """
     Create a new AI chat session in Sure.
 
@@ -449,7 +526,7 @@ def create_chat(title: Optional[str] = None) -> str:
     """
     try:
         with get_client() as client:
-            payload: Dict[str, Any] = {}
+            payload: dict[str, Any] = {}
             if title:
                 payload["title"] = title
 
@@ -494,8 +571,7 @@ def send_message(chat_id: str, content: str) -> str:
     try:
         with get_client() as client:
             response = client.post(
-                f"/api/v1/chats/{chat_id}/messages",
-                json={"content": content}
+                f"/api/v1/chats/{chat_id}/messages", json={"content": content}
             )
             data = handle_response(response)
 
@@ -526,24 +602,31 @@ def delete_chat(chat_id: str) -> str:
         return f"Error deleting chat: {str(e)}"
 
 
-def main():
+def main() -> None:
     """Main entry point for the server."""
     logger.info("Starting Sure MCP Server...")
     try:
-        port = int(os.getenv("PORT", "8000"))
-        
-        mcp.run(
-            transport="streamable-http",
-            host="0.0.0.0",
-            port=port,
+        logger.info("MCP endpoint: http://%s:%s%s", mcp.settings.host, PORT, MCP_PATH)
+        import uvicorn
+
+        uvicorn.run(
+            app,
+            host=mcp.settings.host,
+            port=PORT,
+            log_level=mcp.settings.log_level.lower(),
         )
     except Exception as e:
         logger.error(f"Failed to run server: {str(e)}")
         raise
 
 
-# Export for mcp run
-app = mcp
+# ASGI application for uvicorn/gunicorn and in-process tests. When
+# MCP_AUTH_TOKEN is set, Hermes must send `Authorization: Bearer <token>`.
+app: ASGIApp = BearerAuthMiddleware(
+    mcp.streamable_http_app(),
+    path=MCP_PATH,
+    token=os.getenv("MCP_AUTH_TOKEN"),
+)
 
 if __name__ == "__main__":
     main()
