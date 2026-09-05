@@ -530,7 +530,13 @@ def main():
     """Main entry point for the server."""
     logger.info("Starting Sure MCP Server...")
     try:
-        mcp.run()
+        port = int(os.getenv("PORT", "8000"))
+        
+        mcp.run(
+            transport="streamable-http",
+            host="0.0.0.0",
+            port=port,
+        )
     except Exception as e:
         logger.error(f"Failed to run server: {str(e)}")
         raise
