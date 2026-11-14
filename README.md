@@ -92,9 +92,15 @@ Once configured, use these tools through Hermes:
 | `get_accounts` | Get all financial accounts | None |
 | `get_transactions` | Get transactions with filtering | `limit`, `start_date`, `end_date`, `account_ids`, `category_ids`, `search` |
 | `get_transaction` | Get single transaction | `transaction_id` |
-| `create_transaction` | Create new transaction | `account_id`, `amount`, `name`, `date`, `category_id`, `notes`, `nature` |
-| `update_transaction` | Update transaction | `transaction_id`, `amount`, `name`, `date`, `category_id`, `notes` |
+| `create_transaction` | Create new transaction | `account_id`, `amount`, `name`, `date`, `category_id`, `notes`, `nature`, `currency` |
+| `update_transaction` | Update transaction | `transaction_id`, `amount`, `name`, `date`, `category_id`, `notes`, `currency`, `nature` |
 | `delete_transaction` | Delete transaction | `transaction_id` |
+| `get_trades` | Get investment trades | `account_id`, `start_date`, `end_date`, `limit` |
+| `create_trade` | Buy/sell a security, or record a deposit, withdrawal (optionally linked to another account), dividend, interest or fee | `account_id`, `type`, `date`, `ticker`, `manual_ticker`, `security_id`, `qty`, `price`, `fee`, `amount`, `currency`, `transfer_account_id` |
+| `update_trade` | Update trade | `trade_id`, `date`, `qty`, `price`, `type`, `name`, `notes`, `currency` |
+| `delete_trade` | Delete trade | `trade_id` |
+| `get_holdings` | Get investment holdings | `account_id`, `date`, `limit` |
+| `get_transfers` | Get transfers between accounts | `limit` |
 | `get_categories` | Get all categories | None |
 | `get_category` | Get single category | `category_id` |
 | `sync_accounts` | Trigger account sync | None |
@@ -104,6 +110,8 @@ Once configured, use these tools through Hermes:
 | `get_chat` | Get chat details | `chat_id` |
 | `send_message` | Send message to AI | `chat_id`, `content` |
 | `delete_chat` | Delete chat session | `chat_id` |
+
+> **Note:** Sure's API has no endpoint for creating accounts, so new accounts must be added in the Sure app. Transactions default to the family's currency, so pass `currency` when adding to an account in a different currency.
 
 ## Configuration
 
