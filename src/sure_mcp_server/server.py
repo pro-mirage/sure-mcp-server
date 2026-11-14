@@ -316,6 +316,7 @@ def create_transaction(
     category_id: str | None = None,
     notes: str | None = None,
     nature: str | None = None,
+    currency: str | None = None,
 ) -> str:
     """
     Create a new transaction in Sure.
@@ -328,6 +329,9 @@ def create_transaction(
         category_id: Optional category ID
         notes: Optional notes
         nature: Optional "income" or "expense" to set amount sign
+        currency: Optional ISO currency code (e.g. "USD", "USDT"). Sure defaults
+            to the family's currency, NOT the account's, so pass the account's
+            currency when it differs from the family default.
     """
     try:
         with get_client() as client:
@@ -344,6 +348,8 @@ def create_transaction(
                 payload["notes"] = notes
             if nature:
                 payload["nature"] = nature
+            if currency:
+                payload["currency"] = currency.upper()
 
             response = client.post(
                 "/api/v1/transactions", json={"transaction": payload}
@@ -365,6 +371,8 @@ def update_transaction(
     date: str | None = None,
     category_id: str | None = None,
     notes: str | None = None,
+    currency: str | None = None,
+    nature: str | None = None,
 ) -> str:
     """
     Update an existing transaction in Sure.
@@ -376,6 +384,8 @@ def update_transaction(
         date: New transaction date in YYYY-MM-DD format
         category_id: New category ID
         notes: New notes
+        currency: New ISO currency code (e.g. "USD", "USDT")
+        nature: Optional "income" or "expense" to set amount sign
     """
     try:
         with get_client() as client:
@@ -391,6 +401,10 @@ def update_transaction(
                 payload["category_id"] = category_id
             if notes is not None:
                 payload["notes"] = notes
+            if currency is not None:
+                payload["currency"] = currency.upper()
+            if nature is not None:
+                payload["nature"] = nature
 
             response = client.patch(
                 f"/api/v1/transactions/{transaction_id}", json={"transaction": payload}
@@ -464,6 +478,264 @@ def get_category(category_id: str) -> str:
     except Exception as e:
         logger.error(f"Failed to get category: {e}")
         return f"Error getting category: {str(e)}"
+
+
+def _extract_list(data: Any, key: str) -> Any:
+    """Pull a list out of a (possibly paginated) Sure API response."""
+    if isinstance(data, dict):
+        items = data.get(key) or data.get("data")
+        if items is not None:
+            return items
+    return data
+
+
+TRADE_TYPES = (
+    "buy",
+    "sell",
+    "deposit",
+    "withdrawal",
+    "dividend",
+    "interest",
+    "fee",
+    "sweep_in",
+    "sweep_out",
+    "reinvestment",
+)
+
+
+@mcp.tool()
+def get_trades(
+    account_id: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 25,
+) -> str:
+    """
+    Get investment trades (buys, sells, dividends, etc.) from Sure.
+
+    Args:
+        account_id: Optional account ID to filter by
+        start_date: Optional start date in YYYY-MM-DD format
+        end_date: Optional end date in YYYY-MM-DD format
+        limit: Number of trades per page (default: 25, max: 100)
+    """
+    try:
+        with get_client() as client:
+            params: dict[str, Any] = {"per_page": min(limit, 100)}
+            if account_id:
+                params["account_id"] = account_id
+            if start_date:
+                params["start_date"] = start_date
+            if end_date:
+                params["end_date"] = end_date
+
+            response = client.get("/api/v1/trades", params=params)
+            data = handle_response(response)
+            return json.dumps(_extract_list(data, "trades"), indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get trades: {e}")
+        return f"Error getting trades: {str(e)}"
+
+
+@mcp.tool()
+def create_trade(
+    account_id: str,
+    type: str,
+    date: str,
+    ticker: str | None = None,
+    manual_ticker: str | None = None,
+    security_id: str | None = None,
+    qty: float | None = None,
+    price: float | None = None,
+    fee: float | None = None,
+    amount: float | None = None,
+    currency: str | None = None,
+    transfer_account_id: str | None = None,
+) -> str:
+    """
+    Create an investment activity in an investment or crypto-exchange account.
+
+    Types and required fields:
+      - buy / sell / sweep_in / sweep_out / reinvestment:
+            ticker (or manual_ticker / security_id), qty, price; optional fee.
+            qty and price are positive; sell is handled by type.
+            ticker may include the exchange, e.g. "AAPL" or "AAPL|XNAS".
+            Use manual_ticker for an offline security Sure won't price.
+      - deposit / withdrawal: amount. Pass transfer_account_id to record it as
+            a linked transfer with another account (e.g. a bank account the
+            money came from); without it, it's a standalone cash entry.
+            Note: a cross-currency linked transfer uses Sure's own exchange
+            rate for the receiving side; fix the inflow amount afterwards
+            with update_transaction if the real rate differs.
+      - dividend: ticker and amount.
+      - interest / fee: amount; ticker optional (defaults to cash).
+
+    Args:
+        account_id: Investment account ID
+        type: One of buy, sell, deposit, withdrawal, dividend, interest, fee,
+            sweep_in, sweep_out, reinvestment
+        date: Trade date in YYYY-MM-DD format
+        ticker: Ticker symbol to look up (e.g. "AAPL")
+        manual_ticker: Offline ticker that Sure won't fetch prices for
+        security_id: Existing Sure security ID
+        qty: Number of shares/units (positive)
+        price: Price per share/unit (positive)
+        fee: Optional fee added to a buy/sell
+        amount: Cash amount for deposit/withdrawal/dividend/interest/fee
+        currency: ISO currency code; defaults to the account's currency
+        transfer_account_id: Other account for a linked deposit/withdrawal
+    """
+    try:
+        trade_type = type.strip().lower()
+        if trade_type not in TRADE_TYPES:
+            return f"Error creating trade: type must be one of {', '.join(TRADE_TYPES)}"
+
+        payload: dict[str, Any] = {
+            "account_id": account_id,
+            "type": trade_type,
+            "date": date,
+        }
+        optional = {
+            "ticker": ticker,
+            "manual_ticker": manual_ticker,
+            "security_id": security_id,
+            "qty": qty,
+            "price": price,
+            "fee": fee,
+            "amount": amount,
+            "currency": currency.upper() if currency else None,
+            "transfer_account_id": transfer_account_id,
+        }
+        payload.update({k: v for k, v in optional.items() if v is not None})
+
+        with get_client() as client:
+            response = client.post("/api/v1/trades", json={"trade": payload})
+            data = handle_response(response)
+
+            logger.info("✅ Created %s trade", trade_type)
+            return json.dumps(data, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to create trade: {e}")
+        return f"Error creating trade: {str(e)}"
+
+
+@mcp.tool()
+def update_trade(
+    trade_id: str,
+    date: str | None = None,
+    qty: float | None = None,
+    price: float | None = None,
+    type: str | None = None,
+    name: str | None = None,
+    notes: str | None = None,
+    currency: str | None = None,
+) -> str:
+    """
+    Update an existing trade in Sure.
+
+    Args:
+        trade_id: The ID of the trade
+        date: New date in YYYY-MM-DD format
+        qty: New quantity (positive)
+        price: New price per share (positive)
+        type: "buy" or "sell"
+        name: New display name
+        notes: New notes
+        currency: New ISO currency code
+    """
+    try:
+        fields = {
+            "date": date,
+            "qty": qty,
+            "price": price,
+            "type": type.lower() if type else None,
+            "name": name,
+            "notes": notes,
+            "currency": currency.upper() if currency else None,
+        }
+        payload = {k: v for k, v in fields.items() if v is not None}
+
+        with get_client() as client:
+            response = client.patch(
+                f"/api/v1/trades/{trade_id}", json={"trade": payload}
+            )
+            data = handle_response(response)
+
+            logger.info(f"✅ Updated trade {trade_id}")
+            return json.dumps(data, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to update trade: {e}")
+        return f"Error updating trade: {str(e)}"
+
+
+@mcp.tool()
+def delete_trade(trade_id: str) -> str:
+    """
+    Delete a trade from Sure.
+
+    Args:
+        trade_id: The ID of the trade to delete
+    """
+    try:
+        with get_client() as client:
+            response = client.delete(f"/api/v1/trades/{trade_id}")
+            data = handle_response(response)
+
+            logger.info(f"✅ Deleted trade {trade_id}")
+            return json.dumps(data, indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to delete trade: {e}")
+        return f"Error deleting trade: {str(e)}"
+
+
+@mcp.tool()
+def get_holdings(
+    account_id: str | None = None,
+    date: str | None = None,
+    limit: int = 50,
+) -> str:
+    """
+    Get investment holdings from Sure.
+
+    Args:
+        account_id: Optional account ID to filter by
+        date: Optional date in YYYY-MM-DD format (holdings are stored per day)
+        limit: Number of holdings per page (default: 50, max: 100)
+    """
+    try:
+        with get_client() as client:
+            params: dict[str, Any] = {"per_page": min(limit, 100)}
+            if account_id:
+                params["account_id"] = account_id
+            if date:
+                params["date"] = date
+
+            response = client.get("/api/v1/holdings", params=params)
+            data = handle_response(response)
+            return json.dumps(_extract_list(data, "holdings"), indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get holdings: {e}")
+        return f"Error getting holdings: {str(e)}"
+
+
+@mcp.tool()
+def get_transfers(limit: int = 25) -> str:
+    """
+    Get transfers between accounts from Sure.
+
+    Args:
+        limit: Number of transfers per page (default: 25, max: 100)
+    """
+    try:
+        with get_client() as client:
+            response = client.get(
+                "/api/v1/transfers", params={"per_page": min(limit, 100)}
+            )
+            data = handle_response(response)
+            return json.dumps(_extract_list(data, "transfers"), indent=2, default=str)
+    except Exception as e:
+        logger.error(f"Failed to get transfers: {e}")
+        return f"Error getting transfers: {str(e)}"
 
 
 @mcp.tool()
